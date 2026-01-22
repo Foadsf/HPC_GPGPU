@@ -1,0 +1,16 @@
+# Build Artifacts
+build/
+out/
+bin/
+*.o
+*.a
+*.so
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.DS_Store
+
+# Dependencies
+vcpkg_installed/
