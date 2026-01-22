@@ -6,61 +6,30 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
-#include <cmath>
-#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cstring>
 
 // --- Configuration ---
-// N=1024 is safe for RGBA8.
-const int N = 1024; 
+const int N = 1024;
 
-// --- Shader Sources ---
-const char* VERT_SRC = R"(
-    attribute vec2 position;
-    varying vec2 v_texCoord;
-    void main() {
-        // Map quad (-1..1) to texture coords (0..1)
-        v_texCoord = position * 0.5 + 0.5;
-        gl_Position = vec4(position, 0.0, 1.0);
+// --- Utils ---
+std::string loadShaderSource(const char* filename) {
+    std::ifstream file(filename);
+    if (!file) {
+        std::cerr << "Error: Could not open " << filename << std::endl;
+        exit(1);
     }
-)";
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
 
-// The GPGPU Kernel
-// Computes Average: C = Sum(A * B) / N
-const char* FRAG_SRC = R"(
-    precision mediump float;
-    varying vec2 v_texCoord;
-    uniform sampler2D texA;
-    uniform sampler2D texB;
-    uniform float size;
-
-    void main() {
-        float sum = 0.0;
-        float myCol = v_texCoord.x;
-        float myRow = v_texCoord.y;
-        float step = 1.0 / size;
-        float halfStep = step * 0.5;
-
-        // Loop k from 0 to 1
-        // We iterate across the row of A and column of B
-        for (float k = 0.0; k < 1.0; k += 0.0009765625) { 
-            // 0.0009765625 is 1/1024. Hardcoded for loop stability on legacy compilers.
-            
-            vec4 valA = texture2D(texA, vec2(k + halfStep, myRow));
-            vec4 valB = texture2D(texB, vec2(myCol, k + halfStep));
-
-            // Accumulate Red channel product
-            sum += valA.r * valB.r;
-        }
-
-        // Divide by N to keep result in 0..1 range (Average)
-        // Otherwise RGBA8 will clamp everything > 1.0 to 1.0
-        float avg = sum / size;
-
-        gl_FragColor = vec4(avg, 0.0, 0.0, 1.0);
-    }
-)";
-
-GLuint createShader(GLenum type, const char* src) {
+GLuint createShader(GLenum type, const char* filename) {
+    std::string source = loadShaderSource(filename);
+    const char* src = source.c_str();
+    
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &src, NULL);
     glCompileShader(shader);
@@ -70,10 +39,17 @@ GLuint createShader(GLenum type, const char* src) {
     if (!success) {
         char log[512];
         glGetShaderInfoLog(shader, 512, NULL, log);
-        std::cerr << "Shader Compile Error: " << log << std::endl;
+        std::cerr << "Shader Error (" << filename << "): " << log << std::endl;
         exit(1);
     }
     return shader;
+}
+
+// Check for extension support string
+bool checkExtension(const char* extName) {
+    const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
+    if (!extensions) return false;
+    return (strstr(extensions, extName) != NULL);
 }
 
 int main() {
@@ -84,7 +60,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
-    GLFWwindow* window = glfwCreateWindow(N, N, "GPGPU", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(N, N, "GPGPU Half-Float", NULL, NULL);
     if (!window) {
         std::cerr << "Failed to create Context." << std::endl;
         glfwTerminate();
@@ -92,61 +68,76 @@ int main() {
     }
     glfwMakeContextCurrent(window);
 
-    const char* renderer = (const char*)glGetString(GL_RENDERER);
-    std::cout << "GL_RENDERER: " << (renderer ? renderer : "Unknown") << std::endl;
+    std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 
-    // --- Data Prep ---
-    // We use A=1.0 and B=1.0. 
-    // Sum = N * 1.0 * 1.0 = 1024.0
-    // Average = 1024.0 / 1024.0 = 1.0
-    // So expected pixel value is 1.0 (White/Red).
-    std::vector<unsigned char> dataA(N * N * 4, 0);
-    std::vector<unsigned char> dataB(N * N * 4, 0);
+    // --- Check Extensions ---
+    bool hasHalfFloat = checkExtension("GL_OES_texture_half_float");
+    std::cout << "GL_OES_texture_half_float: " << (hasHalfFloat ? "FOUND" : "MISSING") << std::endl;
+    
+    // Some drivers need the specific "Color Buffer" extension to render TO the texture
+    bool hasColorBuffer = checkExtension("GL_EXT_color_buffer_half_float"); 
+    std::cout << "GL_EXT_color_buffer_half_float: " << (hasColorBuffer ? "FOUND" : "MISSING") << std::endl;
 
-    for (int i = 0; i < N*N; i++) {
-        // Red channel = 255 (which is float 1.0)
-        dataA[i*4 + 0] = 255; 
-        dataA[i*4 + 3] = 255; // Alpha
-        
-        dataB[i*4 + 0] = 255; 
-        dataB[i*4 + 3] = 255; 
+    if (!hasHalfFloat) {
+        std::cerr << "Warning: Half-Float not supported. Results will likely clamp to 1.0." << std::endl;
     }
 
-    // --- Texture Setup (RGBA8 / Unsigned Byte) ---
+    // --- Data Prep ---
+    // A = 1.0, B = 1.0. 
+    // Expected Sum = 1024.0.
+    std::vector<float> dataA(N * N * 4);
+    std::vector<float> dataB(N * N * 4);
+
+    for (int i = 0; i < N*N; i++) {
+        dataA[i*4 + 0] = 1.0f; dataA[i*4 + 1] = 0.0f; dataA[i*4 + 2] = 0.0f; dataA[i*4 + 3] = 1.0f;
+        dataB[i*4 + 0] = 1.0f; dataB[i*4 + 1] = 0.0f; dataB[i*4 + 2] = 0.0f; dataB[i*4 + 3] = 1.0f;
+    }
+
+    // --- Texture Setup ---
+    // Define the type. If extension exists, use GL_HALF_FLOAT_OES (0x8D61).
+    // Otherwise fallback to GL_FLOAT (which might fail on ES2) or GL_UNSIGNED_BYTE.
+    // For this test, we force the attempt.
+    GLenum texType = hasHalfFloat ? 0x8D61 : GL_FLOAT; 
+
     GLuint texA, texB;
     glGenTextures(1, &texA);
     glBindTexture(GL_TEXTURE_2D, texA);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, dataA.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_FLOAT, dataA.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     glGenTextures(1, &texB);
     glBindTexture(GL_TEXTURE_2D, texB);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, dataB.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_FLOAT, dataB.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-    // --- FBO Setup ---
+    // --- FBO Setup (The critical part) ---
     GLuint fbo, texOut;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
     glGenTextures(1, &texOut);
     glBindTexture(GL_TEXTURE_2D, texOut);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    
+    // Attempt to allocate Half-Float texture for output
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, texType, NULL);
+    
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texOut, 0);
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "FBO Incomplete! Driver does not support this format." << std::endl;
+    GLenum fboStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (fboStatus != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "FBO Error: " << fboStatus << std::endl;
+        std::cerr << "Driver likely rejected rendering to Half-Float." << std::endl;
         return -1;
     }
 
     // --- Shader & Draw ---
-    GLuint vs = createShader(GL_VERTEX_SHADER, VERT_SRC);
-    GLuint fs = createShader(GL_FRAGMENT_SHADER, FRAG_SRC);
+    GLuint vs = createShader(GL_VERTEX_SHADER, "vertex.glsl");
+    GLuint fs = createShader(GL_FRAGMENT_SHADER, "fragment.glsl");
     GLuint program = glCreateProgram();
     glAttachShader(program, vs);
     glAttachShader(program, fs);
@@ -170,7 +161,7 @@ int main() {
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texA);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, texB);
 
-    std::cout << "Starting GPU Compute..." << std::endl;
+    std::cout << "Starting Half-Float Compute..." << std::endl;
     auto t1 = std::chrono::high_resolution_clock::now();
     
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -180,13 +171,19 @@ int main() {
     std::cout << "GPU Time: " << std::chrono::duration<double, std::milli>(t2-t1).count() << " ms" << std::endl;
 
     // --- Readback ---
-    std::vector<unsigned char> results(N * N * 4);
-    glReadPixels(0, 0, N, N, GL_RGBA, GL_UNSIGNED_BYTE, results.data());
+    // We read back as FLOAT. Driver converts Half -> Float.
+    std::vector<float> results(N * N * 4);
+    glReadPixels(0, 0, N, N, GL_RGBA, GL_FLOAT, results.data());
 
-    // Verify Center Pixel
-    // We expect 1.0 (which is 255 in bytes)
-    int val = results[(N/2 * N + N/2) * 4]; 
-    std::cout << "Center Pixel Red Value: " << val << " (Expected: 255)" << std::endl;
+    float val = results[(N/2 * N + N/2) * 4];
+    std::cout << "Center Pixel Value: " << val << std::endl;
+    std::cout << "Expected: " << (float)N << ".0" << std::endl;
+    
+    if (val > 1.0f) {
+        std::cout << "SUCCESS: Values > 1.0 preserved. Half-Float GPGPU works!" << std::endl;
+    } else {
+        std::cout << "FAILURE: Value clamped to 1.0. FBO likely fell back to 8-bit." << std::endl;
+    }
 
     glfwTerminate();
     return 0;

@@ -1,43 +1,47 @@
-# GPGPU Matrix Multiplication (OpenGL ES 2.0)
+# GPGPU Matrix Multiplication (OpenGL ES 2.0 / Half-Float)
 
-This example implements "Classic GPGPU" matrix multiplication on the Raspberry Pi 3 Model B.
+This benchmark implements GPGPU Matrix Multiplication on the Raspberry Pi 3 Model B (VideoCore IV).
 
 ## Architecture
-Since the Broadcom VideoCore IV GPU does not support Compute Shaders (which require OpenGL ES 3.1+), this implementation uses the **Fragment Shader** technique (OpenGL ES 2.0):
-1.  **Input:** Matrices $A$ and $B$ are encoded into RGBA textures.
-2.  **Compute:** A fragment shader calculates the dot product for each pixel.
-3.  **Output:** Results are rendered to a Framebuffer Object (FBO) and read back to the CPU.
+Since the VideoCore IV GPU lacks Compute Shaders (OpenGL 4.3), this implementation uses a **Fragment Shader** approach with **Half-Float Textures**.
 
-## Implementation Details
-* **Format:** `GL_RGBA` / `GL_UNSIGNED_BYTE` (Standard 8-bit channels).
-* **Normalization:** The shader calculates the **Average** ($Sum / N$) rather than the Sum. This prevents the 8-bit color channels from saturating (clamping to 1.0) when values exceed 1.0.
-* **Kernel:** The fragment shader iterates through the "row" of Texture A and "column" of Texture B to compute the result.
+* **Technique:** Render-to-Texture (Ping-Pong).
+* **Precision:** 16-bit Floating Point (`GL_OES_texture_half_float`).
+    * Unlike standard 8-bit textures (which clamp values to `1.0`), Half-Floats allow storing values up to ~65,504.
+    * This enables actual general-purpose computation (e.g., matrices with values > 1.0).
+
+## Hardware vs Software
+* **Extension:** Requires `GL_OES_texture_half_float` and `GL_EXT_color_buffer_half_float`.
+* **Verification:** Verified working on Raspberry Pi OS via `llvmpipe` (Software Rasterizer).
+    * *Note on Hardware:* Native VideoCore IV support for rendering **to** half-float textures depends on the specific Mesa driver version active.
 
 ## Build & Run
 
 ### Prerequisites
 * `libgles2-mesa-dev`
-* `glfw3`
+* `glfw3` (via vcpkg)
 * `cmake`
 
 ### Compilation
 ```bash
-mkdir build
-cd build
-cmake ..
+mkdir build && cd build
+cmake .. -DCMAKE_TOOLCHAIN_FILE=~/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build .
 
 ```
 
 ### Execution
 
-To run on the hardware GPU, you need an active X session (desktop or VNC).
+**Headless (Software Verification):**
 
 ```bash
-# If running from a desktop terminal or VNC:
-./gpgpu_mm
-
-# If running headless via SSH (requires Xvfb, runs in software emulation):
 xvfb-run -a ./gpgpu_mm
+
+```
+
+**Hardware (Requires Active X Session):**
+
+```bash
+./gpgpu_mm
 
 ```
