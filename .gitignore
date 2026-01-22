@@ -1,12 +1,14 @@
-# Build Artifacts
+# Build Directories (Root and Nested)
 build/
 out/
 bin/
+
+# Compiled Objects & Libraries
 *.o
 *.a
 *.so
 
-# IDEs
+# IDE & Editors
 .vscode/
 .idea/
 *.swp
@@ -14,3 +16,6 @@ bin/
 
 # Dependencies
 vcpkg_installed/
+
+# Obsolete/Temporary files
+examples/000_MatrixMul/compute.glsl

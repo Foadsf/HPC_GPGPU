@@ -1,174 +1,192 @@
-#include <glad/glad.h>
+#define GLFW_INCLUDE_ES2
 #include <GLFW/glfw3.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+
 #include <iostream>
 #include <vector>
 #include <chrono>
-#include <fstream>
-#include <sstream>
-#include <cstring>
 #include <cmath>
+#include <cstdlib>
 
 // --- Configuration ---
-const int WIDTH = 1024;
-const int SIZE = WIDTH * WIDTH;
+// N=1024 is safe for RGBA8.
+const int N = 1024; 
 
-// --- ERROR CALLBACK ---
-void glfw_error_callback(int error, const char* description) {
-    std::cerr << "GLFW Error " << error << ": " << description << std::endl;
-}
+// --- Shader Sources ---
+const char* VERT_SRC = R"(
+    attribute vec2 position;
+    varying vec2 v_texCoord;
+    void main() {
+        // Map quad (-1..1) to texture coords (0..1)
+        v_texCoord = position * 0.5 + 0.5;
+        gl_Position = vec4(position, 0.0, 1.0);
+    }
+)";
 
-std::string loadShader(const char* filename) {
-    std::ifstream file(filename);
-    if (!file) return "";
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
+// The GPGPU Kernel
+// Computes Average: C = Sum(A * B) / N
+const char* FRAG_SRC = R"(
+    precision mediump float;
+    varying vec2 v_texCoord;
+    uniform sampler2D texA;
+    uniform sampler2D texB;
+    uniform float size;
 
-void cpu_matrix_mult(const std::vector<float>& A, const std::vector<float>& B, std::vector<float>& C) {
-    for (int row = 0; row < WIDTH; row++) {
-        for (int col = 0; col < WIDTH; col++) {
-            float sum = 0.0f;
-            for (int k = 0; k < WIDTH; k++) {
-                sum += A[row * WIDTH + k] * B[k * WIDTH + col];
-            }
-            C[row * WIDTH + col] = sum;
+    void main() {
+        float sum = 0.0;
+        float myCol = v_texCoord.x;
+        float myRow = v_texCoord.y;
+        float step = 1.0 / size;
+        float halfStep = step * 0.5;
+
+        // Loop k from 0 to 1
+        // We iterate across the row of A and column of B
+        for (float k = 0.0; k < 1.0; k += 0.0009765625) { 
+            // 0.0009765625 is 1/1024. Hardcoded for loop stability on legacy compilers.
+            
+            vec4 valA = texture2D(texA, vec2(k + halfStep, myRow));
+            vec4 valB = texture2D(texB, vec2(myCol, k + halfStep));
+
+            // Accumulate Red channel product
+            sum += valA.r * valB.r;
         }
+
+        // Divide by N to keep result in 0..1 range (Average)
+        // Otherwise RGBA8 will clamp everything > 1.0 to 1.0
+        float avg = sum / size;
+
+        gl_FragColor = vec4(avg, 0.0, 0.0, 1.0);
     }
-}
+)";
 
-int main(int argc, char* argv[]) {
-    bool skipCPU = false;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--skip-cpu") == 0) skipCPU = true;
-    }
-
-    // 1. Setup Error Callback & Init
-    glfwSetErrorCallback(glfw_error_callback);
-    
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW" << std::endl;
-        return -1;
-    }
-
-    // 2. Request Specific Context (4.3 Core) to ensure compatibility
-    // NOTE: Raspberry Pi 3B (VideoCore IV) does not natively support 4.3!
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-
-    GLFWwindow* window = glfwCreateWindow(640, 480, "Hidden", NULL, NULL);
-    if (!window) {
-        std::cerr << "Failed to create GLFW window. Check your GPU drivers." << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
-    glfwMakeContextCurrent(window);
-    
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        std::cerr << "Failed to initialize GLAD" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-
-    // --- IDENTIFY GPU ---
-    const GLubyte* renderer = glGetString(GL_RENDERER);
-    const GLubyte* vendor = glGetString(GL_VENDOR);
-    std::cout << "=========================================" << std::endl;
-    std::cout << "  GPU: " << (renderer ? (const char*)renderer : "Unknown") << std::endl;
-    std::cout << "  Vendor: " << (vendor ? (const char*)vendor : "Unknown") << std::endl;
-    std::cout << "=========================================" << std::endl;
-
-    // --- DATA GENERATION ---
-    std::vector<float> A(SIZE);
-    std::vector<float> B(SIZE);
-    std::vector<float> C_CPU(SIZE);
-    std::vector<float> C_GPU(SIZE);
-
-    for (int i = 0; i < SIZE; i++) {
-        A[i] = static_cast<float>(rand()) / RAND_MAX;
-        B[i] = static_cast<float>(rand()) / RAND_MAX;
-    }
-
-    // --- CPU BENCH ---
-    if (!skipCPU) {
-        std::cout << "Starting CPU Matrix Multiplication..." << std::endl;
-        auto startCPU = std::chrono::high_resolution_clock::now();
-        cpu_matrix_mult(A, B, C_CPU);
-        auto endCPU = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> msCPU = endCPU - startCPU;
-        std::cout << "CPU Time: " << msCPU.count() << " ms" << std::endl;
-    } else {
-        std::cout << "Skipping CPU Benchmark..." << std::endl;
-    }
-
-    // --- GPU BENCH ---
-    std::string sourceStr = loadShader("compute.glsl");
-    if (sourceStr.empty()) {
-        std::cerr << "Error: compute.glsl not found!" << std::endl;
-        return -1;
-    }
-    const char* src = sourceStr.c_str();
-
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+GLuint createShader(GLenum type, const char* src) {
+    GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &src, NULL);
     glCompileShader(shader);
-
+    
     GLint success;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (!success) {
-        char infoLog[512];
-        glGetShaderInfoLog(shader, 512, NULL, infoLog);
-        std::cerr << "Shader Error: " << infoLog << std::endl;
+        char log[512];
+        glGetShaderInfoLog(shader, 512, NULL, log);
+        std::cerr << "Shader Compile Error: " << log << std::endl;
+        exit(1);
+    }
+    return shader;
+}
+
+int main() {
+    if (!glfwInit()) return -1;
+    
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+
+    GLFWwindow* window = glfwCreateWindow(N, N, "GPGPU", NULL, NULL);
+    if (!window) {
+        std::cerr << "Failed to create Context." << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+    glfwMakeContextCurrent(window);
+
+    const char* renderer = (const char*)glGetString(GL_RENDERER);
+    std::cout << "GL_RENDERER: " << (renderer ? renderer : "Unknown") << std::endl;
+
+    // --- Data Prep ---
+    // We use A=1.0 and B=1.0. 
+    // Sum = N * 1.0 * 1.0 = 1024.0
+    // Average = 1024.0 / 1024.0 = 1.0
+    // So expected pixel value is 1.0 (White/Red).
+    std::vector<unsigned char> dataA(N * N * 4, 0);
+    std::vector<unsigned char> dataB(N * N * 4, 0);
+
+    for (int i = 0; i < N*N; i++) {
+        // Red channel = 255 (which is float 1.0)
+        dataA[i*4 + 0] = 255; 
+        dataA[i*4 + 3] = 255; // Alpha
+        
+        dataB[i*4 + 0] = 255; 
+        dataB[i*4 + 3] = 255; 
+    }
+
+    // --- Texture Setup (RGBA8 / Unsigned Byte) ---
+    GLuint texA, texB;
+    glGenTextures(1, &texA);
+    glBindTexture(GL_TEXTURE_2D, texA);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, dataA.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glGenTextures(1, &texB);
+    glBindTexture(GL_TEXTURE_2D, texB);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, dataB.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // --- FBO Setup ---
+    GLuint fbo, texOut;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    glGenTextures(1, &texOut);
+    glBindTexture(GL_TEXTURE_2D, texOut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texOut, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "FBO Incomplete! Driver does not support this format." << std::endl;
         return -1;
     }
 
+    // --- Shader & Draw ---
+    GLuint vs = createShader(GL_VERTEX_SHADER, VERT_SRC);
+    GLuint fs = createShader(GL_FRAGMENT_SHADER, FRAG_SRC);
     GLuint program = glCreateProgram();
-    glAttachShader(program, shader);
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "position");
     glLinkProgram(program);
     glUseProgram(program);
 
-    std::cout << "Starting GPU Matrix Multiplication..." << std::endl;
-    auto startGPU = std::chrono::high_resolution_clock::now();
+    glUniform1i(glGetUniformLocation(program, "texA"), 0);
+    glUniform1i(glGetUniformLocation(program, "texB"), 1);
+    glUniform1f(glGetUniformLocation(program, "size"), (float)N);
 
-    GLuint ssboA, ssboB, ssboC;
-    glGenBuffers(1, &ssboA); glGenBuffers(1, &ssboB); glGenBuffers(1, &ssboC);
+    float vertices[] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboA);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, SIZE * sizeof(float), A.data(), GL_STATIC_DRAW);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssboA);
+    glViewport(0, 0, N, N);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texA);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, texB);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboB);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, SIZE * sizeof(float), B.data(), GL_STATIC_DRAW);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssboB);
+    std::cout << "Starting GPU Compute..." << std::endl;
+    auto t1 = std::chrono::high_resolution_clock::now();
+    
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboC);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, SIZE * sizeof(float), NULL, GL_DYNAMIC_COPY);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssboC);
+    auto t2 = std::chrono::high_resolution_clock::now();
+    std::cout << "GPU Time: " << std::chrono::duration<double, std::milli>(t2-t1).count() << " ms" << std::endl;
 
-    glUniform1i(glGetUniformLocation(program, "WIDTH"), WIDTH);
-    glDispatchCompute(WIDTH / 32, WIDTH / 32, 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    // --- Readback ---
+    std::vector<unsigned char> results(N * N * 4);
+    glReadPixels(0, 0, N, N, GL_RGBA, GL_UNSIGNED_BYTE, results.data());
 
-    float* ptr = (float*)glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY);
-    if (ptr) memcpy(C_GPU.data(), ptr, SIZE * sizeof(float));
-    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-
-    auto endGPU = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> msGPU = endGPU - startGPU;
-    std::cout << "GPU Time: " << msGPU.count() << " ms" << std::endl;
-
-    if (!skipCPU) {
-        bool correct = true;
-        for (int i = 0; i < SIZE; i++) {
-            if (std::abs(C_CPU[i] - C_GPU[i]) > 0.1f) { 
-                correct = false; break; 
-            }
-        }
-        std::cout << "Results Match: " << (correct ? "YES" : "NO") << std::endl;
-    }
+    // Verify Center Pixel
+    // We expect 1.0 (which is 255 in bytes)
+    int val = results[(N/2 * N + N/2) * 4]; 
+    std::cout << "Center Pixel Red Value: " << val << " (Expected: 255)" << std::endl;
 
     glfwTerminate();
     return 0;

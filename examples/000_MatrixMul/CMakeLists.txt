@@ -1,16 +1,10 @@
-cmake_minimum_required(VERSION 3.15)
-project(GPGPU_MatrixMul)
+cmake_minimum_required(VERSION 3.10)
+project(GPGPU_GLES)
+
+set(CMAKE_CXX_STANDARD 17)
 
 find_package(glfw3 CONFIG REQUIRED)
-find_package(glad CONFIG REQUIRED)
 
+# Link against system GLESv2
 add_executable(gpgpu_mm main.cpp)
-
-target_link_libraries(gpgpu_mm PRIVATE glfw glad::glad)
-set_property(TARGET gpgpu_mm PROPERTY CXX_STANDARD 17)
-
-add_custom_command(TARGET gpgpu_mm POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/compute.glsl"
-        $<TARGET_FILE_DIR:gpgpu_mm>
-)
+target_link_libraries(gpgpu_mm PRIVATE glfw GLESv2)
