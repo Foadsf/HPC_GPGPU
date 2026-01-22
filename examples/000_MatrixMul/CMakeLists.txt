@@ -43,8 +43,7 @@ target_compile_options(gpgpu_mm PRIVATE
 # Copy shader files to build directory
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/vertex.glsl
                ${CMAKE_CURRENT_BINARY_DIR}/vertex.glsl COPYONLY)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fragment.glsl
-               ${CMAKE_CURRENT_BINARY_DIR}/fragment.glsl COPYONLY)
+# Note: fragment.glsl is generated dynamically in main.cpp for the specific matrix size
 
 # Installation
 install(TARGETS gpgpu_mm DESTINATION bin)
