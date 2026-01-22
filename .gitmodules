@@ -1,0 +1,3 @@
+[submodule "examples/001_QPU_MatrixMul/QPULib"]
+	path = examples/001_QPU_MatrixMul/QPULib
+	url = https://github.com/mn416/QPULib.git
