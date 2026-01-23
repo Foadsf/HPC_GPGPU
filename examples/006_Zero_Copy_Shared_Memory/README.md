@@ -1,4 +1,3 @@
-```markdown
 # 006_Zero_Copy_Shared_Memory
 
 **Micro-benchmark demonstrating the bandwidth benefits of Zero-Copy architecture on the Raspberry Pi 3B's Unified Memory System.**
